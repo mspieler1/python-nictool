@@ -6,6 +6,7 @@ Docs and available functions at https://www.nictool.com/docs/api/
 import logging
 import string
 import time
+from typing import Tuple
 
 import urllib3
 # Install SOAPpy 0.12.22
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 CACHE = CacheManager()
 
 
-class NicTool(object):
+class NicTool:
     """API object"""
 
     def __init__(self, username, password, nictoolUrl, soapUrl):
@@ -38,16 +39,18 @@ class NicTool(object):
         self.nt_user_session = None
 
     @staticmethod
-    def assemble_body(args):
+    def assemble_body(args) -> str:
         """Build SOAP body with key/value pairs"""
         typemap = (
             (int, "int"),
             (float, "float"),
             (str, "string")
         )
+        body = ''
         if isinstance(args, dict):
             body = '<c-gensym6 xsi:type="apachens:Map">'
-            for key, value in args.iteritems():
+            for key, value in args.items():
+                vstring = ''
                 for vtype, vstring in typemap:
                     if isinstance(value, vtype):
                         break
@@ -61,17 +64,18 @@ class NicTool(object):
         soap_body = parseSOAPRPC(soap)
         try:
             count = 0
+            soap_value = ''
             for i in soap_body.__dict__.keys():
                 if i[0] != "_":  # Don't count the private stuff
                     count += 1
                     soap_value = getattr(soap_body, i)
             if count == 1:  # Only one piece of data, bubble it up
                 soap_body = soap_value
-        except:
+        except Exception:
             pass
         return soap_body
 
-    def _make_api_call(self, method, arguments):
+    def _make_api_call(self, method: str, arguments) -> str:
         logger.debug("%s %s" % (method, str(arguments)))
         seconds_idle = time.time() - self.activity_timestamp
         self.activity_timestamp = time.time()
@@ -91,8 +95,8 @@ class NicTool(object):
         response_xml = opener.open(req, data=post_body).read()
         logger.debug(response_xml)
         response = self.parseSOAP(response_xml)
-        if "error_code" in dir(response) and response.error_msg != "OK":
-            raise Exception('"%s request failed [%s]: %s' % (method, response.error_code, response.error_msg))
+        if 'error_code' in dir(response) and response.error_msg != 'OK':
+            raise Exception(f'{method} request failed [{response.error_code}]: {response.error_msg}')
         return response
 
     def __getattr__(self, name):
@@ -104,7 +108,7 @@ class NicTool(object):
         return handlerFunction
 
     @CACHE.cache('nictoolcache', expire=600)
-    def find_zone(self, wanted_zone):
+    def find_zone(self, wanted_zone: str):
         """
         Finds the zone id for a given zone
         wanted_zone - The string of the zone you are looking for.
@@ -113,19 +117,19 @@ class NicTool(object):
         zone_id = None
         start = 0
         remaining = 1
-        logger.debug("Finding zone " + wanted_zone)
+        logger.debug(f'Finding zone {wanted_zone}')
         while remaining > 0 and zone_id is None:
             args = {
-                "Search": 1,
-                "nt_group_id": 1,
-                "include_subgroups": 1,
-                "exact_match": 1,
-                "quick_search": 0,
-                "start": start,
-                "limit": 255,
-                "0_field": "zone",
-                "0_value": wanted_zone,
-                "0_option": "equals",
+                'Search': 1,
+                'nt_group_id': 1,
+                'include_subgroups': 1,
+                'exact_match': 1,
+                'quick_search': 0,
+                'start': start,
+                'limit': 255,
+                '0_field': 'zone',
+                '0_value': wanted_zone,
+                '0_option': 'equals',
             }
             response = self.get_group_zones(args)
             if response.total == 1:
@@ -133,24 +137,24 @@ class NicTool(object):
             for current_zone in response.zones:
                 if current_zone.zone.upper() == wanted_zone.upper():
                     zone_id = current_zone.nt_zone_id
-                    logger.debug("Found zone id %d" % zone_id)
+                    logger.debug(f'Found zone id {zone_id}')
                     return zone_id
             offset = response.page * response.limit
             remaining = response.total - offset
-            logger.debug("Continuing search at offset %d of %d." % (offset, response.total))
+            logger.debug(f'Continuing search at offset {offset} of {response.total}.')
             start = offset
-        logger.error("Unable to find zone %s" % wanted_zone)
-        raise Exception("Unable to find zone %s" % wanted_zone)
+        logger.error(f'Unable to find zone {wanted_zone}')
+        raise Exception(f'Unable to find zone {wanted_zone}')
 
-    def find_record_in_zone(self, zone, record, record_type):
+    def find_record_in_zone(self, zone: str, record: str, record_type: str):
         """Find a record of specified type in provided zone"""
         zone_id = self.find_zone(zone)
         response = self.get_zone_records({
-            "Search": 1,
-            "nt_zone_id": zone_id,
-            "0_field": 'type',
-            "0_value": record_type,
-            "0_option": 'equals',
+            'Search': 1,
+            'nt_zone_id': zone_id,
+            '0_field': 'type',
+            '0_value': record_type,
+            '0_option': 'equals',
             '1_inclusive': 'And',
             '1_field': 'name',
             '1_value': record,
@@ -159,29 +163,29 @@ class NicTool(object):
         })
         return response
 
-    def delete_record_from_zone(self, zone, record, record_type):
+    def delete_record_from_zone(self, zone: str, record: str, record_type: str):
         """Delete a record of specified type from provided zone"""
         response = self.find_record_in_zone(zone, record, record_type)
-        if response['total'] < 1:
-            logger.debug("Unable to find %s [%s] to delete from %s" % (record, record_type, zone))
+        if response.get('total') < 1:
+            logger.debug(f'Unable to find {record} [{record_type}] to delete from {zone}')
             return
-        if response['total'] > 1:
+        if response.get('total') > 1:
             logger.warning("%d records matched %s [%s] from %s" % (response['total'], record, record_type, zone))
             return
-        logger.debug("Deleting %s [%s] from %s" % (record, record_type, zone))
-        record = response['records'][0]
-        response = self.delete_zone_record({
-            "nt_zone_record_id": record['nt_zone_record_id']
+        logger.debug(f'Deleting {record} [{record_type}] from {zone}')
+        record = response.get('records')[0]
+        _ = self.delete_zone_record({
+            'nt_zone_record_id': record['nt_zone_record_id']
         })
         return record
 
     @staticmethod
-    def ip_to_arpa(ipaddr):
+    def ip_to_arpa(ipaddr) -> Tuple[str, str]:
         """Translate IP to ARPA format"""
         a, b, c, d = ipaddr.split(".")
-        return d, "%s.%s.%s.in-addr.arpa" % (c, b, a)
+        return d, f'{c}.{b}.{a}.in-addr.arpa'
 
-    def hostname_to_name_zone(self, hostname):
+    def hostname_to_name_zone(self, hostname: str) -> Tuple[str, str]:
         """Find a zone from hostname"""
         fqdn = hostname.rstrip('.')
         name = ''
@@ -196,67 +200,67 @@ class NicTool(object):
         # name, _, zone = hostname.rstrip('.').partition('.')
         # return name, zone
 
-    def delete_forward_and_reverse_records(self, hostname=None, ip=None):
+    def delete_forward_and_reverse_records(self, hostname: str = None, ip: str = None):
         """Delete records"""
         # If a hostname is specified, delete the hostname record and the reverse record if it matches the hostname
         if hostname is not None:
             name, zone = self.hostname_to_name_zone(hostname)
-            record = self.delete_record_from_zone(zone, name, "A")
+            record = self.delete_record_from_zone(zone, name, 'A')
             if record is not None:
                 name, zone = self.ip_to_arpa(record['address'])
-                ip_record = self.find_record_in_zone(zone, name, "PTR")
+                ip_record = self.find_record_in_zone(zone, name, 'PTR')
                 if ip_record:
                     ip_record = ip_record['records'][0]
                     if ip_record['address'].rstrip('.') != hostname:  # We do this incase we have multiple A records to an IP. We don't want to delete the reverse unless its the right one
-                        logger.warning("Reverse record for %s [%s] does not match %s, not deleting %s.%s" % (record['address'], ip_record['address'].rstrip('.'), hostname, name, zone))
+                        logger.warning(f'Reverse record for {record["address"]} [{ip_record["address"].rstrip(".")}] does not match {hostname}, not deleting {name}.{zone}')
                     else:
-                        record = self.delete_record_from_zone(zone, name, "PTR")
+                        _ = self.delete_record_from_zone(zone, name, "PTR")
         # If an ip is specified, delete the PTR and the A record it points to
-        if ip is not None:
+        if ip:
             name, zone = self.ip_to_arpa(ip)
-            record = self.delete_record_from_zone(zone, name, "PTR")
-            if record is not None:
+            record = self.delete_record_from_zone(zone, name, 'PTR')
+            if record:
                 name, _, zone = hostname.rstrip('.').partition('.')
-                record = self.delete_record_from_zone(zone, name, "A")
+                _ = self.delete_record_from_zone(zone, name, 'A')
 
-    def add_record_to_zone(self, zone, record, record_type, address, ttl=3600, weight=10):
+    def add_record_to_zone(self, zone: str, record: str, record_type: str, address: str, ttl=3600, weight=10) -> int:
         """Add a record to specified zone"""
         zone_id = self.find_zone(zone)
         addition = {
-            "nt_zone_id": zone_id,
-            "nt_zone_record_id": "",
-            "name": record,
-            "type": record_type,
-            "address": address,
-            "ttl": ttl
+            'nt_zone_id': zone_id,
+            'nt_zone_record_id': '',
+            'name': record,
+            'type': record_type,
+            'address': address,
+            'ttl': ttl
         }
         if record_type == 'MX':
             addition['weight'] = weight
         result = self.new_zone_record(addition)
         return result.nt_zone_record_id
 
-    def add_forward_and_reverse_records(self, hostname=None, ipaddr=None, ttl=3600):
+    def add_forward_and_reverse_records(self, hostname: str = None, ipaddr: str = None, ttl: int = 3600) -> None:
         """Add forward and reverse record for provided hostname/IP"""
         if hostname is None or ipaddr is None:
             return
         name, zone = self.hostname_to_name_zone(hostname)
-        self.add_record_to_zone(zone, name, "A", ipaddr, ttl=ttl)
+        self.add_record_to_zone(zone, name, 'A', ipaddr, ttl=ttl)
         name, zone = self.ip_to_arpa(ipaddr)
-        self.add_record_to_zone(zone, name, "PTR", hostname + ".", ttl=ttl)
+        self.add_record_to_zone(zone, name, 'PTR', f'{hostname}.', ttl=ttl)
 
-    def add_forward_record(self, hostname=None, ipaddr=None, ttl=3600):
+    def add_forward_record(self, hostname: str = None, ipaddr: str = None, ttl: int = 3600) -> None:
         """Add a forward record"""
         if hostname is None or ipaddr is None:
             return
         name, zone = self.hostname_to_name_zone(hostname)
-        self.add_record_to_zone(zone, name, "A", ipaddr, ttl=ttl)
+        self.add_record_to_zone(zone, name, 'A', ipaddr, ttl=ttl)
 
-    def add_reverse_record(self, hostname=None, ipaddr=None, ttl=3600):
+    def add_reverse_record(self, hostname: str = None, ipaddr: str = None, ttl: int = 3600) -> None:
         """Add a reverse record"""
         if hostname is None or ipaddr is None:
             return
         name, zone = self.ip_to_arpa(ipaddr)
-        self.add_record_to_zone(zone, name, "PTR", hostname + ".", ttl=ttl)
+        self.add_record_to_zone(zone, name, 'PTR', f'{hostname}.', ttl=ttl)
 
 # get_group_zones
 # edit_zone
