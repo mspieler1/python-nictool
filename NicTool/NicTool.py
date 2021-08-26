@@ -6,9 +6,10 @@ Docs and available functions at https://www.nictool.com/docs/api/
 import logging
 import string
 import time
-from typing import Tuple
+from ipaddress import AddressValueError, IPv4Address
+from typing import Tuple, Union
 
-import urllib3
+import requests
 # Install SOAPpy 0.12.22
 from SOAPpy.Parser import parseSOAPRPC
 # Install Beaker 1.11.0
@@ -42,9 +43,9 @@ class NicTool:
     def assemble_body(args) -> str:
         """Build SOAP body with key/value pairs"""
         typemap = (
-            (int, "int"),
-            (float, "float"),
-            (str, "string")
+            (int, 'int'),
+            (float, 'float'),
+            (str, 'string')
         )
         body = ''
         if isinstance(args, dict):
@@ -54,7 +55,7 @@ class NicTool:
                 for vtype, vstring in typemap:
                     if isinstance(value, vtype):
                         break
-                body = body + '''<item><key xsi:type="xsd:string">%s</key><value xsi:type="xsd:%s">%s</value></item>\n''' % (key, vstring, value)
+                body = body + f'''<item><key xsi:type="xsd:string">{key}</key><value xsi:type="xsd:{vstring}">{value}</value></item>\n'''
             body = body + '</c-gensym6>'
         return body
 
@@ -66,7 +67,7 @@ class NicTool:
             count = 0
             soap_value = ''
             for i in soap_body.__dict__.keys():
-                if i[0] != "_":  # Don't count the private stuff
+                if i[0] != '_':  # Don't count the private stuff
                     count += 1
                     soap_value = getattr(soap_body, i)
             if count == 1:  # Only one piece of data, bubble it up
@@ -76,27 +77,42 @@ class NicTool:
         return soap_body
 
     def _make_api_call(self, method: str, arguments) -> str:
-        logger.debug("%s %s" % (method, str(arguments)))
+        logger.debug(f'{method} {str(arguments)}')
         seconds_idle = time.time() - self.activity_timestamp
         self.activity_timestamp = time.time()
-        if seconds_idle > 120 or (self.nt_user_session is None and not arguments.get("username")):
+        if seconds_idle > 120 or (self.nt_user_session is None and not arguments.get('username')):
             self.nt_user_session = None
             self.nt_user_session = self.login(username=self.username, password=self.password, nt_user_session='').nt_user_session
-        arguments["nt_user_session"] = self.nt_user_session
+        arguments['nt_user_session'] = self.nt_user_session
+
         body = self.assemble_body(arguments)
         post_body = self.soap_blob.substitute(method=method, body=body, url=self.soap_url)
-        logger.debug(post_body)
-        req = urllib3.Request(self.nictool_url)
-        opener = urllib3.build_opener(urllib3.HTTPHandler)
         soapaction = self.soap_url + '#' + method
-        req.add_header('SOAPAction', soapaction)
-        req.add_header('Content-Type', 'text/xml')
-        logger.debug(req)
-        response_xml = opener.open(req, data=post_body).read()
-        logger.debug(response_xml)
-        response = self.parseSOAP(response_xml)
-        if 'error_code' in dir(response) and response.error_msg != 'OK':
-            raise Exception(f'{method} request failed [{response.error_code}]: {response.error_msg}')
+        logger.debug(post_body)
+
+        request_response = requests.post(
+            url=self.nictool_url,
+            headers={
+                'SOAPAction': soapaction,
+                'Content-Type': 'text/xml'
+            },
+            data=post_body,
+            verify=False
+        )
+        response = self.parseSOAP(request_response.text)
+
+        # req = urllib2.Request(self.nictool_url)
+        # opener = urllib2.build_opener(urllib2.HTTPHandler)
+        # req.add_header('SOAPAction', soapaction)
+        # req.add_header('Content-Type', 'text/xml')
+        # logger.debug(req)
+        #
+        # response_xml = opener.open(req, data=post_body).read()
+        # logger.debug(response_xml)
+        # response = self.parseSOAP(response_xml)
+        if response.status_code not in [200, 201]:
+            # 'error_code' in dir(response) and response.error_msg != 'OK':
+            raise Exception(f'{method} request failed [{response.status_code}]: {response.text}')
         return response
 
     def __getattr__(self, name):
@@ -118,7 +134,7 @@ class NicTool:
         start = 0
         remaining = 1
         logger.debug(f'Finding zone {wanted_zone}')
-        while remaining > 0 and zone_id is None:
+        while remaining > 0 and zone_id:
             args = {
                 'Search': 1,
                 'nt_group_id': 1,
@@ -131,6 +147,7 @@ class NicTool:
                 '0_value': wanted_zone,
                 '0_option': 'equals',
             }
+            # SOAP Call
             response = self.get_group_zones(args)
             if response.total == 1:
                 zone_id = response.nt_zone_id
@@ -149,6 +166,7 @@ class NicTool:
     def find_record_in_zone(self, zone: str, record: str, record_type: str):
         """Find a record of specified type in provided zone"""
         zone_id = self.find_zone(zone)
+        # SOAP Call
         response = self.get_zone_records({
             'Search': 1,
             'nt_zone_id': zone_id,
@@ -174,13 +192,22 @@ class NicTool:
             return
         logger.debug(f'Deleting {record} [{record_type}] from {zone}')
         record = response.get('records')[0]
+        # SOAP Call
         _ = self.delete_zone_record({
             'nt_zone_record_id': record['nt_zone_record_id']
         })
         return record
 
     @staticmethod
-    def ip_to_arpa(ipaddr) -> Tuple[str, str]:
+    def check_ip_addr(ipaddr: str) -> bool:
+        try:
+            _ = IPv4Address(ipaddr)
+            return True
+        except AddressValueError:
+            return False
+
+    @staticmethod
+    def ip_to_arpa(ipaddr: str) -> Tuple[str, str]:
         """Translate IP to ARPA format"""
         a, b, c, d = ipaddr.split(".")
         return d, f'{c}.{b}.{a}.in-addr.arpa'
@@ -200,13 +227,13 @@ class NicTool:
         # name, _, zone = hostname.rstrip('.').partition('.')
         # return name, zone
 
-    def delete_forward_and_reverse_records(self, hostname: str = None, ip: str = None):
+    def delete_forward_and_reverse_records(self, hostname: str = None, ip: str = None) -> None:
         """Delete records"""
         # If a hostname is specified, delete the hostname record and the reverse record if it matches the hostname
-        if hostname is not None:
+        if hostname:
             name, zone = self.hostname_to_name_zone(hostname)
             record = self.delete_record_from_zone(zone, name, 'A')
-            if record is not None:
+            if record:
                 name, zone = self.ip_to_arpa(record['address'])
                 ip_record = self.find_record_in_zone(zone, name, 'PTR')
                 if ip_record:
@@ -223,7 +250,7 @@ class NicTool:
                 name, _, zone = hostname.rstrip('.').partition('.')
                 _ = self.delete_record_from_zone(zone, name, 'A')
 
-    def add_record_to_zone(self, zone: str, record: str, record_type: str, address: str, ttl=3600, weight=10) -> int:
+    def add_record_to_zone(self, zone: str, record: str, record_type: str, address: str, ttl=3600, weight=10) -> str:
         """Add a record to specified zone"""
         zone_id = self.find_zone(zone)
         addition = {
@@ -236,12 +263,16 @@ class NicTool:
         }
         if record_type == 'MX':
             addition['weight'] = weight
+
+        # SOAP Call
         result = self.new_zone_record(addition)
         return result.nt_zone_record_id
 
     def add_forward_and_reverse_records(self, hostname: str = None, ipaddr: str = None, ttl: int = 3600) -> None:
         """Add forward and reverse record for provided hostname/IP"""
-        if hostname is None or ipaddr is None:
+        if not hostname or not ipaddr:
+            return
+        if ipaddr and not self.check_ip_addr(ipaddr):
             return
         name, zone = self.hostname_to_name_zone(hostname)
         self.add_record_to_zone(zone, name, 'A', ipaddr, ttl=ttl)
@@ -250,18 +281,115 @@ class NicTool:
 
     def add_forward_record(self, hostname: str = None, ipaddr: str = None, ttl: int = 3600) -> None:
         """Add a forward record"""
-        if hostname is None or ipaddr is None:
+        if not hostname or not ipaddr:
+            return
+        if ipaddr and not self.check_ip_addr(ipaddr):
             return
         name, zone = self.hostname_to_name_zone(hostname)
         self.add_record_to_zone(zone, name, 'A', ipaddr, ttl=ttl)
 
     def add_reverse_record(self, hostname: str = None, ipaddr: str = None, ttl: int = 3600) -> None:
         """Add a reverse record"""
-        if hostname is None or ipaddr is None:
+        if not hostname or not ipaddr:
+            return
+        if ipaddr and not self.check_ip_addr(ipaddr):
             return
         name, zone = self.ip_to_arpa(ipaddr)
         self.add_record_to_zone(zone, name, 'PTR', f'{hostname}.', ttl=ttl)
 
+    def create_edit_zone(self, refresh: int, retry: int, expire: int, minimum: int, nt_zone_id: str = None, nt_group_id: str = '1', zone: str = '', ttl: int = 3600, serial: str = '',
+                         nameservers: str = '', mailaddr: str = '', description: str = '') -> Union[str, None]:
+        """Create a new zone"""
+        if not nt_zone_id and not nameservers and not zone:
+            return
+
+        parameters = {
+            'nt_zone_id': nt_zone_id,
+            'nt_group_id': nt_group_id,
+            'zone': zone,
+            'ttl': int(ttl),
+            'serial': serial,
+            'nameservers': nameservers,
+            'mailaddr': mailaddr,
+            'description': description,
+            'refresh': refresh,
+            'retry': retry,
+            'expire': expire,
+            'minimum': minimum
+        }
+        # SOAP Call
+        result = self.new_zone(parameters)
+        return result.nt_zone_record_id
+
+    def create_edit_nameserver(self, output_format: str, service_type: str, nt_nameserver_id: str = None, nt_group_id: str = '1', datadir: str = '', description: str = '', logdir: str = '',
+                               name: str = '', address: str = None, ttl: int = 3600) -> Union[str, None]:
+        """Create a new zone"""
+        if output_format not in ['djb', 'bind'] and service_type not in ['hosted', 'data-only']:
+            return
+        if not name and not address:
+            return
+        if address and not self.check_ip_addr(address):
+            return
+        parameters = {
+            'nt_nameserver_id': nt_nameserver_id,
+            'nt_group_id': nt_group_id,
+            'datadir': datadir,
+            'description': description,
+            'logdir': logdir,
+            'name': name,
+            'address': address,
+            'ttl': ttl,
+            'output_format': output_format,
+            'service_type': service_type
+        }
+        # SOAP Call
+        result = self.new_nameserver(parameters)
+        return result.nt_nameserver_id
+
+    def create_new_user(self, nt_group_id: str, email: str, username: str, password: str, first_name: str = '', last_name: str = '', inherit_group_permissions: bool = False, **permissions) -> Union[str, None]:
+        permission_list = [
+            'group_write'
+            'group_create',
+            'group_delete',
+            'zone_write',
+            'zone_create',
+            'zone_delegate',
+            'zone_delete',
+            'zonerecord_write',
+            'zonerecord_create',
+            'zonerecord_delegate',
+            'zonerecord_delete',
+            'user_write',
+            'user_create',
+            'user_delete',
+            'nameserver_write',
+            'nameserver_create',
+            'nameserver_delete',
+            'self_write',
+            'inherit_group_permissions',
+        ]
+        valid_perms = dict()
+        if not inherit_group_permissions:
+            for perm_name, perm_value in permissions.items():
+                if perm_name not in permission_list or isinstance(perm_value, bool):
+                    return
+                valid_perms[perm_name] = perm_value
+
+        parameters = {
+            'nt_group_id': nt_group_id,
+            'email': email,
+            'username': username,
+            'password': password,
+            'password2': password,
+            'first_name': first_name,
+            'last_name': last_name,
+            'inherit_group_permissions': inherit_group_permissions
+        }
+        if valid_perms:
+            parameters.update(permissions)
+        # SOAP Call
+        result = self.new_user(parameters)
+        return result.nt_user_id
 # get_group_zones
 # edit_zone
 # new_zone
